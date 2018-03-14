@@ -42,29 +42,6 @@ const INDEX_HTML: &'static [u8] = include_bytes!(index_path!());
 macro_rules! index_js (() => { "../static/index.js" });
 const INDEX_JS: &'static [u8] = include_bytes!(index_js!());
 
-impl Service for HelloWorld {
-    // boilerplate hooking up hyper's server types
-    type Request = Request;
-    type Response = Response;
-    type Error = hyper::Error;
-    // The future representing the eventual Response your call will
-    // resolve to. This can change to whatever Future you need.
-    type Future = Box<Future<Item=Self::Response, Error=Self::Error>>;
-
-    fn call(&self, _req: Request) -> Self::Future {
-        // We're currently ignoring the Request
-        // And returning an 'ok' Future, which means it's ready
-        // immediately, and build a Response with the 'PHRASE' body.
-        Box::new(futures::future::ok(
-            Response::new()
-                .with_header(ContentLength(PHRASE.len() as u64))
-                .with_body(PHRASE)
-        ))
-    }
-}
-
-pub struct HelloWorld;
-
 pub struct FewStaticInBinContent;
 
 impl Service for FewStaticInBinContent {
@@ -162,7 +139,7 @@ impl Service for Echo {
 pub struct UserPers {
   id : Vec<u8>,
   addr : SocketAddr,
-  fw : Sender<Vec<u8>>,
+  tx : Sender<Vec<u8>>,
 }
 
 const MAX_SIMULTANEOUS_CONNECTIONS : usize = 100;
@@ -207,15 +184,43 @@ fn main() {
           users.insert(user_id.clone(), UserPers {
             id : user_id.clone(),
             addr : addr.clone(),
-            fw : sender, 
+            tx : sender.clone(), 
           });
-          addr_user.insert(addr,user_id);
+          addr_user.insert(addr,(user_id,sender));
           remote2.spawn(|_|f2);
         },
         RoutingMsg::CLOSE_SOCKET(addr) => {
-          if let Some(uid) = addr_user.remove(&addr) {
+          if let Some((uid,_)) = addr_user.remove(&addr) {
             users.remove(&uid);
           }
+        },
+        RoutingMsg::FW_SDP(addr,mut dest_id,mut sdp,state) => {
+          if let Some(&(ref sender_id, ref sender_tx)) = addr_user.get(&addr) {
+            if let Some(ref mut dest_pers) = users.get_mut(&dest_id) {
+              let mut m = match state {
+                CON_STATE::CONNECT => vec![CONN_QUERY],
+                CON_STATE::REPCONNECT => vec![CONN_REP],
+              };
+              m.push((sender_id.len() / 256) as u8);
+              m.push((sender_id.len() % 256) as u8);
+              m.append(&mut sender_id.clone());
+              m.append(&mut sdp);
+              let f2 = dest_pers.clone().tx.send(m)
+              .map_err(|e|println!("sink error {:?}",e))
+              .map(|_|());
+              remote2.spawn(|_|f2);
+            } else {
+              let mut m = vec![CONN_WITH_SDP_KO];
+              m.append(&mut dest_id);
+              let f2 = sender_tx.clone().send(m)
+              .map_err(|e|println!("sink error {:?}",e))
+              .map(|_|());
+              remote2.spawn(|_|f2);
+            }
+          } else {
+            println!("inconsistent connection status : sdp connect receive before user registration");
+          }
+
         },
       }
       Ok(())
@@ -352,6 +357,19 @@ fn main() {
                                spawn_future(tx3.send(RoutingMsg::REG_USER(addr,b,to_route.clone())),"Send reg msg", &handle3);
                                Some(OwnedMessage::Binary(vec![REG_USER_OK]))
                              },
+                             CONN_WITH_SDP 
+                             | CONNREP_WITH_SDP => {
+                               let l_sid = (b[0] as usize) * 256 + (b[1] as usize);
+                               let mut sid = b.split_off(2);
+                               let sdp = sid.split_off(l_sid);
+                               let state = match type_msg {
+                                 CONN_WITH_SDP => CON_STATE::CONNECT,
+                                 CONNREP_WITH_SDP => CON_STATE::REPCONNECT,
+                                 _ => unreachable!(),
+                               };
+                               spawn_future(tx3.send(RoutingMsg::FW_SDP(addr,sid,sdp, state)),"Send reg msg", &handle3);
+                               None
+                             },
                              _ => None,
                            }
                          } else {
@@ -382,13 +400,24 @@ fn main() {
  // core.run(futures::future::empty::<(), ()>()).unwrap();
 }
 
-const  REG_USER : u8 = 1;
-const  REG_USER_OK : u8 = 2;
+const REG_USER : u8 = 1;
+const REG_USER_OK : u8 = 2;
+const CONN_WITH_SDP : u8 = 3;
+const CONN_WITH_SDP_KO : u8 = 4;
+const CONN_QUERY : u8 = 5;
+const CONNREP_WITH_SDP : u8 = 6;
+const CONN_REP : u8 = 7;
 
 #[derive(Debug)]
 pub enum RoutingMsg {
-  REG_USER(SocketAddr,Vec<u8>,Sender<Vec<u8>>),
   CLOSE_SOCKET(SocketAddr),
+  REG_USER(SocketAddr,Vec<u8>,Sender<Vec<u8>>),
+  FW_SDP(SocketAddr,Vec<u8>,Vec<u8>,CON_STATE),
+}
+#[derive(Debug)]
+pub enum CON_STATE {
+  CONNECT,
+  REPCONNECT,
 }
 
 fn register_user(userid : Vec<u8>, users : &mut HashMap<Vec<u8>,()>) {
