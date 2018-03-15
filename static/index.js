@@ -5,9 +5,16 @@ let signalwebrtc = {
 function iceCallback (a,b) {
   console.log(a);
 }
-function iceGatheringStateChangeQuery (a,pc, userdestId) {
-  console.log ('state change');
-  console.log(a);
+function iceGatheringStateChange (a, userdestId) {
+  console.log ('ice state change');
+  //console.log(a);
+  if (a.candidate != null) {
+    let msg = sendsdptoid(userdestId, a.candidate.candidate, MESSAGE_CODES.ICE_CANDIDATE);
+    wsSend(msg);
+  }
+}
+
+/*function iceGatheringStateChangeQuery (a,pc, userdestId) {
   if (pc.iceGatheringState == "complete") {
   console.log('gathComplet');
       pc.createOffer().then(
@@ -24,8 +31,6 @@ function iceGatheringStateChangeQuery (a,pc, userdestId) {
   }
 }
 function iceGatheringStateChangeReply (a,pc, userdestId) {
-  console.log ('state change');
-  console.log(a);
   if (pc.iceGatheringState == "complete") {
   console.log('gathComplet2');
       pc.createAnswer().then(
@@ -42,7 +47,7 @@ function iceGatheringStateChangeReply (a,pc, userdestId) {
       }
     );
   }
-}
+}*/
 
 
 
@@ -130,6 +135,16 @@ function receiveSocketBytes(bytes) {
       recConReply(fromId,desc);
     }
     break;
+    case MESSAGE_CODES.ICE_CANDIDATE : {
+      let fromLen = bytes[1] * 256 + bytes[2];
+      let fromId = btoa(new TextDecoder().decode(bytes.slice(3,3+fromLen)));
+      let icesdp = new TextDecoder().decode(bytes.slice(3+fromLen));
+      // only support data so line index is 0 for all support need to serialize mid and line index to
+      let candidate = new RTCIceCandidate({candidate : icesdp, sdpMid : "data", sdpMLineIndex : 0});
+      recCandidate(fromId,candidate);
+    }
+    break;
+ 
     default:
       console.log("Unmanaged message from server : " + bytes);
   }
@@ -187,7 +202,8 @@ function connectWith(userdestId, cb) {
       };
 
       let pc = new RTCPeerConnection(config);
-      pc.onicecandidate = (a) => iceGatheringStateChangeQuery(a,pc, userdestId);
+      pc.onicecandidate = (a) => iceGatheringStateChange(a,userdestId);
+      //pc.onicecandidate = (a) => iceGatheringStateChangeQuery(a,pc, userdestId);
       pc.ondatachannel = onDataChannel;
       pc.chanCounter = 0;
       pc.channels = {};
@@ -238,7 +254,7 @@ function recConQuery(fromId, offer) {
       };
 
       let pc = new RTCPeerConnection(config);
-      pc.onicecandidate = (a) => iceGatheringStateChangeReply(a,pc, fromId);
+      pc.onicecandidate = (a) => iceGatheringStateChange(a,fromId);
       pc.ondatachannel = onDataChannel;
       pc.chanCounter = 0;
       pc.channels = {};
@@ -247,7 +263,7 @@ function recConQuery(fromId, offer) {
     }
     let pc = signalwebrtc.rtcPeerConnections[fromId];
     pc.setRemoteDescription(offer);
-    if (!iceInit) {
+    //if (!iceInit) {
     pc.createAnswer().then(
       (a) => {
         pc.setLocalDescription(a);
@@ -259,23 +275,31 @@ function recConQuery(fromId, offer) {
         console.log(e);
       }
     );
-    }
+    //}
   });
 }
 
 function recConReply(fromId, answer) {
-  withStunServer (() => {
-    if (signalwebrtc.rtcPeerConnections[fromId] == null) {
-      console.log("received answer when no offer has been made, ignoring");
-      return;
-    }
-    let pc = signalwebrtc.rtcPeerConnections[fromId];
+  if (signalwebrtc.rtcPeerConnections[fromId] == null) {
+    console.log("received answer when no offer has been made, ignoring");
+    return;
+  }
+  let pc = signalwebrtc.rtcPeerConnections[fromId];
 
-    if (pc.signalingState !== 'stable') {
-      pc.setRemoteDescription(answer);
-    }
-  });
+  if (pc.signalingState !== 'stable') {
+    pc.setRemoteDescription(answer);
+  }
 }
+function recCandidate(fromId, candidate) {
+  if (signalwebrtc.rtcPeerConnections[fromId] == null) {
+    console.log("received candidate when no offer has been made, ignoring");
+    return;
+  }
+  let pc = signalwebrtc.rtcPeerConnections[fromId];
+
+  pc.addIceCandidate(candidate);
+}
+
 
 
 function onSendChannelStateChange(sendChannel,cb) {
@@ -309,7 +333,8 @@ const MESSAGE_CODES = {
   CONN_WITH_SDP_KO : 4,
   CONN_QUERY : 5,
   CONNREP_WITH_SDP : 6,
-  CONN_REP : 7
+  CONN_REP : 7,
+  ICE_CANDIDATE : 8
 }
 
 function sendsdptoid(destid, sdp, code) {

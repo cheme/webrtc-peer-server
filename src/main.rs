@@ -200,6 +200,7 @@ fn main() {
               let mut m = match state {
                 CON_STATE::CONNECT => vec![CONN_QUERY],
                 CON_STATE::REPCONNECT => vec![CONN_REP],
+                CON_STATE::ICE => vec![ICE_CANDIDATE],
               };
               m.push((sender_id.len() / 256) as u8);
               m.push((sender_id.len() % 256) as u8);
@@ -358,6 +359,7 @@ fn main() {
                                Some(OwnedMessage::Binary(vec![REG_USER_OK]))
                              },
                              CONN_WITH_SDP 
+                             | ICE_CANDIDATE 
                              | CONNREP_WITH_SDP => {
                                let l_sid = (b[0] as usize) * 256 + (b[1] as usize);
                                let mut sid = b.split_off(2);
@@ -365,6 +367,7 @@ fn main() {
                                let state = match type_msg {
                                  CONN_WITH_SDP => CON_STATE::CONNECT,
                                  CONNREP_WITH_SDP => CON_STATE::REPCONNECT,
+                                 ICE_CANDIDATE => CON_STATE::ICE,
                                  _ => unreachable!(),
                                };
                                spawn_future(tx3.send(RoutingMsg::FW_SDP(addr,sid,sdp, state)),"Send reg msg", &handle3);
@@ -407,6 +410,7 @@ const CONN_WITH_SDP_KO : u8 = 4;
 const CONN_QUERY : u8 = 5;
 const CONNREP_WITH_SDP : u8 = 6;
 const CONN_REP : u8 = 7;
+const ICE_CANDIDATE : u8 = 8;
 
 #[derive(Debug)]
 pub enum RoutingMsg {
@@ -418,6 +422,7 @@ pub enum RoutingMsg {
 pub enum CON_STATE {
   CONNECT,
   REPCONNECT,
+  ICE,
 }
 
 fn register_user(userid : Vec<u8>, users : &mut HashMap<Vec<u8>,()>) {
