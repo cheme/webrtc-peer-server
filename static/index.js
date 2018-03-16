@@ -1,7 +1,8 @@
 let signalwebrtc = {
   rtcPeerConnections : {}
 }
-
+// TODO testing with higher vals
+let bufferFullThreshold = 65536;
 function iceCallback (a,b) {
   console.log(a);
 }
@@ -111,9 +112,9 @@ function receiveSocketBytes(bytes) {
 //      let senderidsize = bytes[1] * 256 + bytes[2];
 //      let senderid = btoa(bytes.slice(3..3+senderidsize));
 //      let counter = bytes[3+senderidsize] * 256 + bytes[4+senderidsize];
-      //let destid = btoa(bytes.slice(5+senderidsize));
-      let destid = btoa(new TextDecoder().decode(bytes.slice(1)));
-      signalwebrtc.rtcPeerConnections[destid] = null;
+      //let destId = btoa(bytes.slice(5+senderidsize));
+      let destId = btoa(new TextDecoder().decode(bytes.slice(1)));
+      signalwebrtc.rtcPeerConnections[destId] = null;
     break;
     case MESSAGE_CODES.CONN_QUERY : {
       let fromLen = bytes[1] * 256 + bytes[2];
@@ -211,17 +212,19 @@ function connectWith(userdestId, cb) {
       iceInit = true;
     }
     let pc = signalwebrtc.rtcPeerConnections[userdestId];
-    let dataConstraint = null;// TODO??
-    let counter = pc.chanCounter;
-    pc.chanCounter += 1;
-    let sendChannel = pc.createDataChannel(userdestId + counter.toString(),
+    let dataConstraint = { ordered : true };
+    if (pc.iceConnectionState !== 'completed') { // dubious
+      dataConstraint = { id : pc.chanCounter, ordered : true }; // default, useless
+      pc.chanCounter += 1;
+    }
+    let sendChannel = pc.createDataChannel(userdestId,
       dataConstraint);
+    sendChannel.binaryType = 'arraybuffer';
     sendChannel.onopen = () => onSendChannelStateChange(sendChannel,cb);
-    sendChannel.onclose = () => onSendChannelStateChange(sendChannel);
+    sendChannel.onclose = () => onChannelClose(pc,sendChannel);
     sendChannel.onmessage = onChannelMessage;
 
-    sendChannel.counter = counter;
-    pc.channels[counter.toString()] = sendChannel;
+    pc.channels[sendChannel.id.toString()] = sendChannel;
 
     if (pc.iceConnectionState !== 'completed') {
       pc.createOffer().then(
@@ -242,6 +245,78 @@ function connectWith(userdestId, cb) {
   });
  
 }
+
+function getSender(destId,counter) {
+  let pc = signalwebrtc.rtcPeerConnections[destId];
+  if (pc != null) {
+    for (let key in pc.channels) {
+      if (counter == null || key === counter.toString()) {
+        return pc.channels[key];
+      }
+    }
+  }
+  return null;
+}
+
+function sendTo(destId,data,cb,cberr) {
+  let sender = getSender(destId);
+  if (sender == null) {
+    if (cberr != null) {
+      cberr("No sender"); // TODO replace with invalid state error
+    }
+  }
+  try {
+
+    let toSendLength = data.byteLength;
+    let sentLength = 0;
+    // arraybuff or uint8array
+    // code from sample with two kind of buff size mgmt TODO polling might not be needed anymor
+          // TODO test on other browser
+    var usePolling = true;
+    if (typeof sender.bufferedAmountLowThreshold === 'number') {
+      console.log('Using the bufferedamountlow event for flow control');
+      usePolling = false;
+      sender.bufferedAmountLowThreshold = bufferFullThreshold;
+    }
+    var listener = function() {
+      sender.removeEventListener('bufferedamountlow', listener);
+      sendAllData();
+    };
+    var sendAllData = function() {
+      let toSendIt = Math.min(bufferFullThreshold - sender.bufferedAmount, toSendLength - sentLength);
+      while (sentLength < toSendLength) {
+        if (sender.bufferedAmount >= bufferFullThreshold) {
+          if (usePolling) {
+            // delay send
+            setTimeout(sendAllData, 250);
+          } else {
+            // kinda flush but more like while(1) upt to no more event loop : idea for a transport flush implementation?
+            sender.addEventListener('bufferedamountlow', listener);
+          }
+          return;
+        }
+        let sentLength1 = sentLength;
+        sentLength += toSendIt;
+        sender.send(data.slice(sentLength1,sentLength));
+      }
+      if (cb != null) {
+        cb()
+      }
+    };
+    setTimeout(sendAllData(),0);
+    //sender.send(data);
+  } catch (e) {
+    // InvalidStateError (wrong state)
+    // NetworkError (data to big TODO avoid it as it is said to close the channel) + TODO reinit chan somehow
+    // TypeError (data to large for receiver : here single data type targetted)
+    console.log(e);
+    if (cberr != null) {
+      cberr(e);
+    }
+  }
+}
+
+
 
 function recConQuery(fromId, offer) {
   withStunServer (() => {
@@ -302,6 +377,10 @@ function recCandidate(fromId, candidate) {
 
 
 
+function onChannelClose(pc,sendChannel) {
+  pc.channels[sendChannel.id.toString()] = null;
+
+}
 function onSendChannelStateChange(sendChannel,cb) {
   var readyState = sendChannel.readyState;
   console.log('Send channel state is: ' + readyState);
@@ -316,12 +395,10 @@ function onSendChannelStateChange(sendChannel,cb) {
 }
 
 function onDataChannel(event) {
-  let counter = this.chanCounter;
-  this.chanCounter += 1;
   event.channel.onopen = () => onSendChannelStateChange(event.channel);
-  event.channel.onclose = () => onSendChannelStateChange(event.channel);
+  event.channel.onclose = () => onChannelClose(this,event.channel);
   event.channel.onmessage = onChannelMessage;
-  this.channels[counter.toString()] = event.channel;
+  this.channels[event.channel.id.toString()] = event.channel;
 }
 function onChannelMessage(event) {
   console.log(event);
@@ -337,9 +414,9 @@ const MESSAGE_CODES = {
   ICE_CANDIDATE : 8
 }
 
-function sendsdptoid(destid, sdp, code) {
+function sendsdptoid(destId, sdp, code) {
   let byteSdp = new TextEncoder("utf-8").encode(sdp);
-  let binaryid = atob(destid);
+  let binaryid = atob(destId);
   let len = binaryid.length + byteSdp.length + 3;
   let bytes = new Uint8Array(len);
   bytes[0] = code;
@@ -368,9 +445,14 @@ function base64ToByteMsg(base64, code) {
   return bytes.buffer;
 }
 
+signalwebrtc.setBufferFullTreshold = function(newT) {
+  bufferFullThreshold = newT;
+};
 
 signalwebrtc.connectSocket = connectSocket;
 signalwebrtc.registerUser = registerUser;
 signalwebrtc.connectWith = connectWith;
+signalwebrtc.getSender = getSender;
+signalwebrtc.sendTo = sendTo;
 
 export default signalwebrtc;
