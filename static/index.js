@@ -1,5 +1,6 @@
 let signalwebrtc = {
-  rtcPeerConnections : {}
+  rtcPeerConnections : {},
+  orphanCandidate : {}
 }
 // TODO testing with higher vals
 let bufferFullThreshold = 65536;
@@ -8,7 +9,6 @@ function iceCallback (a,b) {
 }
 function iceGatheringStateChange (a, userdestId) {
   console.log ('ice state change');
-  //console.log(a);
   if (a.candidate != null) {
     let msg = sendsdptoid(userdestId, a.candidate.candidate, MESSAGE_CODES.ICE_CANDIDATE);
     wsSend(msg);
@@ -120,9 +120,10 @@ function receiveSocketBytes(bytes) {
       let fromLen = bytes[1] * 256 + bytes[2];
       let fromId = btoa(new TextDecoder().decode(bytes.slice(3,3+fromLen)));
       let sdp = new TextDecoder().decode(bytes.slice(3+fromLen));
-      let desc = new RTCSessionDescription();
-      desc.type = 'offer';
-      desc.sdp = sdp;
+      let desc = new RTCSessionDescription({
+        type : 'offer',
+        sdp : sdp
+      });
       recConQuery(fromId,desc);
     }
     break;
@@ -130,9 +131,10 @@ function receiveSocketBytes(bytes) {
       let fromLen = bytes[1] * 256 + bytes[2];
       let fromId = btoa(new TextDecoder().decode(bytes.slice(3,3+fromLen)));
       let sdp = new TextDecoder().decode(bytes.slice(3+fromLen));
-      let desc = new RTCSessionDescription();
-      desc.type = 'answer';
-      desc.sdp = sdp;
+      let desc = new RTCSessionDescription({
+        type : 'answer',
+        sdp : sdp
+      });
       recConReply(fromId,desc);
     }
     break;
@@ -140,9 +142,8 @@ function receiveSocketBytes(bytes) {
       let fromLen = bytes[1] * 256 + bytes[2];
       let fromId = btoa(new TextDecoder().decode(bytes.slice(3,3+fromLen)));
       let icesdp = new TextDecoder().decode(bytes.slice(3+fromLen));
-      // only support data so line index is 0 for all support need to serialize mid and line index to
-      let candidate = new RTCIceCandidate({candidate : icesdp, sdpMid : "data", sdpMLineIndex : 0});
-      recCandidate(fromId,candidate);
+      recCandidate(fromId,icesdp);
+
     }
     break;
  
@@ -197,7 +198,7 @@ function connectWith(userdestId, cb) {
     let iceInit = false;
     if (signalwebrtc.rtcPeerConnections[userdestId] == null) {
       let config = {
-        iceServers: [{url :signalwebrtc.stunServer}],
+        iceServers: [{urls :signalwebrtc.stunServer}],
         iceTransportPolicy: 'all',
         iceCandidatePoolSize: '0'
       };
@@ -230,6 +231,7 @@ function connectWith(userdestId, cb) {
       pc.createOffer().then(
         (a) => {
           pc.setLocalDescription(a);
+          pc.mid = getMidFromSdp(a.sdp);
           let msg = sendsdptoid(userdestId, a.sdp, MESSAGE_CODES.CONN_WITH_SDP);
           //let msg = sendsdptoid(userdestId, counter, a.sdp, MESSAGE_CODES.CONN_WITH_SDP);
           //if (!iceInit) {
@@ -323,7 +325,7 @@ function recConQuery(fromId, offer) {
     let iceInit = false;
     if (signalwebrtc.rtcPeerConnections[fromId] == null) {
       let config = {
-        iceServers: [{url :signalwebrtc.stunServer}],
+        iceServers: [{urls :signalwebrtc.stunServer}],
         iceTransportPolicy: 'all',
         iceCandidatePoolSize: '0'
       };
@@ -338,6 +340,14 @@ function recConQuery(fromId, offer) {
     }
     let pc = signalwebrtc.rtcPeerConnections[fromId];
     pc.setRemoteDescription(offer);
+    pc.mid = getMidFromSdp(offer.sdp);
+    if (signalwebrtc.orphanCandidate[fromId] != null) {
+      let cs = signalwebrtc.orphanCandidate[fromId];
+      for (let c in cs) {
+        recCandidate(fromId, cs[c]);
+      }
+      signalwebrtc.orphanCandidate[fromId] = null;
+    }
     //if (!iceInit) {
     pc.createAnswer().then(
       (a) => {
@@ -365,16 +375,43 @@ function recConReply(fromId, answer) {
     pc.setRemoteDescription(answer);
   }
 }
-function recCandidate(fromId, candidate) {
+function recCandidate(fromId, icesdp) {
   if (signalwebrtc.rtcPeerConnections[fromId] == null) {
-    console.log("received candidate when no offer has been made, ignoring");
+    console.log("received candidate when no offer has been made, storing");
+    if (signalwebrtc.orphanCandidate[fromId] == null) {
+      signalwebrtc.orphanCandidate[fromId] = [];
+    }
+    signalwebrtc.orphanCandidate[fromId].push(icesdp);
     return;
   }
   let pc = signalwebrtc.rtcPeerConnections[fromId];
 
-  pc.addIceCandidate(candidate);
+  let sdpMid = 'data';
+  if (pc.mid != null) {
+    sdpMid= pc.mid;
+  }
+
+  let candidate2 = new RTCIceCandidate({candidate : icesdp, sdpMid : sdpMid, sdpMLineIndex : 0});
+
+  pc.addIceCandidate(candidate2);
 }
 
+function getMidFromSdp (sdp) {
+  var mids = [];
+  // TODO better regexp
+  sdp.split('\n').forEach((s) => {
+    var match = s.match(/^a=mid:(\S+)\s*$/);
+    if (match) {
+      mids.push(match[1]);
+    }
+  });
+
+  if (mids.length !== 1) {
+    console.log("no mid likely to be an issue using 'data' as default");
+    return 'data';
+  }
+  return mids[0];
+}
 
 
 function onChannelClose(pc,sendChannel) {
