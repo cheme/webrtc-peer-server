@@ -5,6 +5,10 @@
 
    </script>
    <script type="module">
+     import webrtctransport from './webrtctransport.js';
+     window.webrtctransport = webrtctransport;
+   </script>
+   <script type="module">
      import sigrtc from './index.js';
      window.sigrtc = sigrtc;
    </script>
@@ -20,6 +24,17 @@
      };
      xhr.open('GET',"./index.js");
      xhr.send();
+     let xhr = new XMLHttpRequest();
+     xhr.responseType = 'javascript';
+     xhr.onload = () => {
+       let js = xhr.response;
+       let s = js.replace(/export\ .*;/g,'') + "window.webrtctransport = webrtctransport;";
+       //# sourceURL=site.js`;
+       eval(s);
+     };
+     xhr.open('GET',"./webrtctransport.js");
+     xhr.send();
+
    </script>
 
     <title>Hello World! Site Title</title>

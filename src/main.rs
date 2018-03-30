@@ -36,11 +36,13 @@ use futures::sync::mpsc::{
 };
 use std::net::SocketAddr;
 const PHRASE: &'static str = "Hello, World!";
-macro_rules! index_path (() => { "../static/index.html" });
-const INDEX_HTML: &'static [u8] = include_bytes!(index_path!());
+const INDEX_HTML: &'static [u8] = include_bytes!("../static/index.html");
 
-macro_rules! index_js (() => { "../static/index.js" });
-const INDEX_JS: &'static [u8] = include_bytes!(index_js!());
+const INDEX_JS: &'static [u8] = include_bytes!("../static/index.js");
+
+const WEBRTCTRANSPORT_JS: &'static [u8] = include_bytes!("../static/webrtctransport.js");
+
+const TRANSPORT_WASM: &'static [u8] = include_bytes!("../../mydht/mydht-externtransport/target/wasm32-unknown-unknown/release/mydht-externtransport.wasm");
 
 pub struct FewStaticInBinContent;
 
@@ -63,6 +65,17 @@ impl Service for FewStaticInBinContent {
                              .with_header(ContentType(mime::TEXT_JAVASCRIPT))
                              .with_body(INDEX_JS);
         },
+        (&Method::Get, "/webrtctransport.js") => {
+          response = response.with_header(ContentLength(WEBRTCTRANSPORT_JS.len() as u64))
+                             .with_header(ContentType(mime::TEXT_JAVASCRIPT))
+                             .with_body(WEBRTCTRANSPORT_JS);
+        },
+        (&Method::Get, "/webrtctransport.wasm") => {
+          response = response.with_header(ContentLength(TRANSPORT_WASM.len() as u64))
+                             .with_header(ContentType(mime::APPLICATION_OCTET_STREAM))
+                             .with_body(TRANSPORT_WASM);
+        },
+ 
         (&Method::Get, "/wsport") => {
           let port = dotenv!("NAT_WEBSOCKET_PORT");
           response = response.with_header(ContentLength(port.len() as u64))
