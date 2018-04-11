@@ -1,4 +1,9 @@
+
+import * as wrtcMod from "./index.js";
+
 let webrtctransport = {
+  transports : {
+  }
 }
 let wasm_mod = null;
 
@@ -8,7 +13,7 @@ function load_wasm_mod (cb) {
   ).then(bytes =>
     WebAssembly.instantiate(bytes, { env: {
       wasm_log : wasm_log,
-      yield_loop : yield_loop,
+      //yield_loop : yield_loop,
       query_listener : query_listener,
       next_pending_connected : next_pending_connected,
       query_new_channel : query_new_channel,
@@ -24,14 +29,19 @@ function load_wasm_mod (cb) {
     console.log(results);
     console.log(results.instance.exports);
     let mod = results.instance;
-    webrtctransport.memory = mod.exports.memory;
+    // test function TODO conditional
     webrtctransport.start_inner = mod.exports.start,
+    webrtctransport.connect_to = mod.exports.test_connect_to,
+    // end test function
+    webrtctransport.memory = mod.exports.memory;
     webrtctransport.alloc = mod.exports.alloc;
     webrtctransport.dealloc = mod.exports.dealloc;
     webrtctransport.restore = mod.exports.restore;
     webrtctransport.start_with_listener = mod.exports.start_with_listener;
+    webrtctransport.transport_ready = mod.exports.transport_ready,
     webrtctransport.connect_success = mod.exports.connect_success;
     webrtctransport.connect_fail = mod.exports.connect_fail;
+    webrtctransport.connect_close = mod.exports.connect_close;
     webrtctransport.receive_connect = mod.exports.receive_connect;
     webrtctransport.write_success = mod.exports.write_success;
     webrtctransport.write_error = mod.exports.write_error;
@@ -44,20 +54,26 @@ function load_wasm_mod (cb) {
   });
 }
 
-
-
-
-
 function run(id) {
   let s = () => {
     let b = base64ToWasmByte(id);
-    wasm_mod.start_inner(b,b.length);
+    wasm_mod.start_inner(b.ptr,b.len);
   };
   if (webrtctransport.instantiated != true) {
     load_wasm_mod(() => s());
   } else {
     s();
   }
+}
+
+function test_connect(send_channel, dest) {
+   let b = base64ToWasmByte(dest);
+   wasm_mod.connect_to(
+     webrtctransport.transports[send_channel].channel,
+     b.ptr,
+     b.len
+   );
+   wasm_mod.restore(webrtctransport.transports[send_channel].handle);
 }
 
 function wasm_log(msg,err) {
@@ -73,25 +89,117 @@ function wasm_log(msg,err) {
       console.log(strMsg);
   }
 }
-function yield_loop(transport_handle) {
-  webrtctransport.unyield = transport_handle;
+/*function yield_loop(transport_handle) {
+  // TODO useless line??
+  webrtctransport.transports[transport_handle]['unyield'] = transport_handle;
   console.log("yield call");
+}*/
+const TRANSPORT_STATE = {
+  CONNECTING_WS : 1,
+  CONNECTED_WS : 2,
+}
+const CHANNEL_STATE = {
+  CONNECTING : 1,
+  CONNECTED : 2,
 }
 
-function query_listener(idListener, idLen) {
-  console.error("unimplemented");
+
+function query_listener(send_channel,transport_trigger,transport_handle,transport_status,idListener,idLen) {
+  let idB = wasmByteToBase64(idListener,idLen);
+  // wrtcmod is curently for a single use so a new instance is used
+  let wrtc = new wrtcMod.default();
+  let newConnections = [];
+  webrtctransport.transports[send_channel] = {
+    idListener: idB.b64,
+    channel: send_channel,
+    handle: transport_handle,
+    newConnections: newConnections,
+    wrtc: wrtc,
+    triggerWasm: transport_trigger,
+    stateWasm: transport_status 
+  };
+
+  wrtc.ondatachannelopencb = (transport,dataChannel) => {
+//    let fromId = base64ToWasmByte(transport.destId);
+//    webrtctransport.receive_connect(fromId.ptr,fromId.len,send_channel,dataChannel.id);
+    newConnections.push([transport.destId,dataChannel.id]);
+    let nc = newConnections[0];
+    newConnections[0] = newConnections[newConnections.length - 1];
+    newConnections[newConnections.length - 1] = nc;
+    webrtctransport.receive_connect(transport_trigger);
+    webrtctransport.restore(transport_handle);
+  };
+
+  // TODO we put to base64 then internaly change to byte for wsocket
+  wrtc.registerUser(idB.b64, () => {
+    // on register success
+    webrtctransport.transports[send_channel].state = TRANSPORT_STATE.CONNECTED_WS;
+    webrtctransport.transport_ready(transport_trigger,transport_status);
+    webrtctransport.restore(transport_handle);
+  });
 }
-function next_pending_connected(idListener, idLen) {
+
+function next_pending_connected(send_channel, id_out, id_len_out, chan_out) {
+   let tr = webrtctransport.transports[send_channel];
+   if (tr == null) {
+     return false;
+   }
+   let conn = tr.newConnections.pop();
+   if (conn != null) {
+     let fromId = base64ToWasmByte(conn[0]);
+     
+     var bytes = new Uint32Array(wasm_mod.memory.buffer,id_out, 1);
+     bytes[0] = fromId.ptr;
+     bytes = new Uint32Array(wasm_mod.memory.buffer,id_len_out, 1);
+     bytes[0] = fromId.len;
+     bytes = new Uint16Array(wasm_mod.memory.buffer,chan_out, 1);
+     bytes[0] = conn[1];
+
+     return true;
+   } else {
+     return false;
+   }
+
   console.error("unimplemented TODO return chanId");
 }
-function query_new_channel(destId, idLen, transport, chan) {
+function query_new_channel(transport_id_in, dest_id_in, id_len_in, channel_trigger_out, channel_status_out, channel_count_out) {
+  let idDest = wasmByteToBase64(dest_id_in,id_len_in);
+  // TODO useless!! not stored -> in closure
+  let channel = {
+    dest: idDest.b64,
+    // TODO useless store??
+    countWasm: channel_status_out,
+    triggerWasm: channel_trigger_out,
+    stateWasm: channel_status_out,
+  };
+  webrtctransport.transports[transport_id_in].wrtc.connectWith(idDest.b64,
+          (transport,sendChannel) => { // on open
+            webrtctransport.connect_success(channel_trigger_out, channel_status_out, channel_count_out, sendChannel.id);
+          },
+          (transport,sendChannel) => { // on close
+            webrtctransport.connect_close(channel_trigger_out, channel_status_out);
+          },
+          (event,sendChannel) => { // on message
   console.error("unimplemented");
+          });
 }
-function read_channel_reg(destId, idLen, chanId, chan) {
-  console.error("unimplemented");
+
+function read_channel_reg(send_channel, dest_id_in, id_len_in, chanId, chan_trig, chan_state) {
+  let idDest = wasmByteToBase64(dest_id_in,id_len_in);
+  let chan = webrtctransport.transports[send_channel].wrtc.rtcPeerConnections[idDest.b64].channels[chanId];
+  let ooclose = chan.onclose;
+  chan.onclose = () => {
+    ooclose();
+    webrtctransport.connect_close(chan_trig, chan_state);
+  };
+  // TODO similar to onmessage with trigerring!!      
+//  sendChannel.onmessage = (event) => onChannelMessage(event,sendChannel,cbmessage);
 }
+
 function close_channel(chan) {
   console.error("unimplemented");
+        // something like
+        // webrtctransport.transports[196784].wrtc.rtcPeerConnections["YWlh"].channels[0].close()
 }
 function write(chan,content,contentLen) {
   console.error("unimplemented return nb write");
@@ -112,10 +220,30 @@ function base64ToWasmByte(base64) {
   let id_buf = wasm_mod.alloc(len);
  
   let bytes = new Uint8Array(wasm_mod.memory.buffer,id_buf, len);
-  for (var i = 0; i < len; i++)        {
+  for (var i = 0; i < len; i++) {
     bytes[i] = binary_string.charCodeAt(i);
   }
-  return bytes.buffer;
+  return {
+    buf: bytes,
+    ptr: id_buf,
+    len: len
+  };
+}
+function fromWasmByte(ptr,len) {
+  //let buffer = new Uint8Array(len);
+  //buffer.set(new Uint8Array(wasm_mod.memory.buffer, ptr, len));
+  let bytes = new Uint8Array(wasm_mod.memory.buffer,ptr, len);
+  return {
+    buf: bytes,
+    ptr: ptr,
+    len: len
+  };
+}
+
+function wasmByteToBase64(ptr,len) {
+  let result = fromWasmByte(ptr,len);
+  result.b64 = btoa(new TextDecoder().decode(result.buf));
+  return result;
 }
 
 // copied from sample, is generator efficient ? (does not currently matter for use case)
@@ -139,5 +267,6 @@ function copyCStr(module, ptr) {
 
 
 webrtctransport.run = run;
-webrtctransport.unyield = null;
+webrtctransport.test_connect = test_connect;
+
 export default webrtctransport;

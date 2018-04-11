@@ -1,7 +1,13 @@
-let signalwebrtc = {
+function newSigwebrtc() {
+
+/*let signalwebrtc = {
   rtcPeerConnections : {},
   orphanCandidate : {}
-}
+}*/
+let signalwebrtc = this;
+signalwebrtc.rtcPeerConnections = {};
+signalwebrtc.orphanCandidate = {};
+signalwebrtc.pendingConnection = [];
 // TODO testing with higher vals
 let bufferFullThreshold = 65536;
 function iceCallback (a,b) {
@@ -90,6 +96,7 @@ function handleSocketMessage(data) {
     }
     fileReader.readAsArrayBuffer(data);
   } else {
+    console.error("receive non blob from websocket");
     console.log(data);
   }
 }
@@ -104,6 +111,12 @@ function receiveSocketBytes(bytes) {
       if (signalwebrtc.onRegisterUser != null) {
         signalwebrtc.onRegisterUser();
       }
+      for (let pcix in signalwebrtc.pendingConnection) {
+        let pendcon = signalwebrtc.pendingConnection[pcix];
+        connectWith(pendcon[0],pendcon[1],pendcon[2],pendcon[3]);
+      }
+      signalwebrtc.pendingConnection = [];
+
     break;
 
   // : 4,
@@ -162,10 +175,10 @@ function wsSend(c) {
  }
 }
 
-function registerUser (userId, cb) {
+function registerUser(userId, cb) {
   if (signalwebrtc.userIdUnderReg != null) {
     console.log("registering user while another register action is in progress");
-    // return // allow it
+    // return // allow it 
   }
   signalwebrtc.userIdUnderReg = userId;
   let b = base64ToByteMsg(userId,MESSAGE_CODES.REG_USER);
@@ -174,7 +187,7 @@ function registerUser (userId, cb) {
   }
   wsSend(b);
 }
-function withStunServer (cb) {
+function withStunServer(cb) {
   if (signalwebrtc.stunServer != null) {
     cb();
   } else {
@@ -189,9 +202,11 @@ function withStunServer (cb) {
     xhr.send();
   }
 }
-function connectWith(userdestId, cb) {
+function connectWith(userdestId,cb,cbclose,cbmessage) {
   if (signalwebrtc.userId == null) {
-    console.log("Trying to connect while not registered");
+    // this case will happen a lot : call connect ws from wasm then call connect to from wasm imediatly
+    console.log("Trying to connect while not registered, pending connection");
+    signalwebrtc.pendingConnection.push([userdestId,cb,cbclose,cbmessage]);
     return;
   }
   withStunServer (() => {
@@ -209,6 +224,7 @@ function connectWith(userdestId, cb) {
       pc.ondatachannel = onDataChannel;
       pc.chanCounter = 0;
       pc.channels = {};
+      pc.destId = userdestId;
       signalwebrtc.rtcPeerConnections[userdestId] = pc;
       iceInit = true;
     }
@@ -221,11 +237,11 @@ function connectWith(userdestId, cb) {
     let sendChannel = pc.createDataChannel(userdestId,
       dataConstraint);
     sendChannel.binaryType = 'arraybuffer';
-    sendChannel.onopen = () => onSendChannelStateChange(sendChannel,cb);
-    sendChannel.onclose = () => onChannelClose(pc,sendChannel);
-    sendChannel.onmessage = onChannelMessage;
+    sendChannel.onopen = () => onChannelOpen(pc,sendChannel,cb);
+    sendChannel.onclose = () => onChannelClose(pc,sendChannel,cbclose);
+    sendChannel.onmessage = (event) => onChannelMessage(event,sendChannel,cbmessage);
 
-    pc.channels[sendChannel.id.toString()] = sendChannel;
+    pc.channels[sendChannel.id] = sendChannel;
 
     if (pc.iceConnectionState !== 'completed') {
       pc.createOffer().then(
@@ -259,9 +275,10 @@ function getSender(destId,counter) {
   }
   return null;
 }
-
-function sendTo(destId,data,cb,cberr) {
-  let sender = getSender(destId);
+// TODO refactor : destid + nullable counter should be replaced by an uint key internally and expose this 
+// interface
+function sendTo(destId,counter,data,cb,cberr) {
+  let sender = getSender(destId,counter);
   if (sender == null) {
     if (cberr != null) {
       cberr("No sender"); // TODO replace with invalid state error
@@ -335,6 +352,7 @@ function recConQuery(fromId, offer) {
       pc.ondatachannel = onDataChannel;
       pc.chanCounter = 0;
       pc.channels = {};
+      pc.destId = fromId;
       signalwebrtc.rtcPeerConnections[fromId] = pc;
       iceInit = true;
     }
@@ -414,17 +432,20 @@ function getMidFromSdp (sdp) {
 }
 
 
-function onChannelClose(pc,sendChannel) {
-  pc.channels[sendChannel.id.toString()] = null;
+function onChannelClose(pc,sendChannel,cbclose) {
+  pc.channels[sendChannel.id] = null;
 
+  if (cbclose != null) {
+    cbclose(pc,sendChannel);
+  }
 }
-function onSendChannelStateChange(sendChannel,cb) {
+function onChannelOpen(pc,sendChannel,cb) {
   var readyState = sendChannel.readyState;
   console.log('Send channel state is: ' + readyState);
   if (readyState === 'open') {
 
     if (cb != null) {
-      cb(sendChannel)
+      cb(pc,sendChannel)
     }
     
   } else {
@@ -432,13 +453,17 @@ function onSendChannelStateChange(sendChannel,cb) {
 }
 
 function onDataChannel(event) {
-  event.channel.onopen = () => onSendChannelStateChange(event.channel);
+  
+  event.channel.onopen = () => onChannelOpen(this,event.channel,signalwebrtc.ondatachannelopencb);
   event.channel.onclose = () => onChannelClose(this,event.channel);
-  event.channel.onmessage = onChannelMessage;
-  this.channels[event.channel.id.toString()] = event.channel;
+  event.channel.onmessage = (ev) => onChannelMessage(ev, event.channel);
+  this.channels[event.channel.id] = event.channel;
 }
-function onChannelMessage(event) {
+function onChannelMessage(event,sendChannel,cbmessage) {
   console.log(event);
+  if (cbmessage != null) {
+    cbmessage(event,sendChannel);
+  }
 }
 const MESSAGE_CODES = {
   REG_USER : 1,
@@ -492,4 +517,6 @@ signalwebrtc.connectWith = connectWith;
 signalwebrtc.getSender = getSender;
 signalwebrtc.sendTo = sendTo;
 
-export default signalwebrtc;
+}
+
+export default newSigwebrtc;

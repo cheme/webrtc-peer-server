@@ -18,7 +18,7 @@
      xhr.responseType = 'javascript';
      xhr.onload = () => {
        let js = xhr.response;
-       let s = js.replace(/export\ .*;/g,'') + "window.sigrtc = signalwebrtc;";
+       let s = js.replace(/export\ .*;/g,'') + "window.newSigwebrtc = newSigwebrtc;";
        //# sourceURL=site.js`;
        eval(s);
      };
