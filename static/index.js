@@ -111,8 +111,7 @@ function receiveSocketBytes(bytes) {
       if (signalwebrtc.onRegisterUser != null) {
         signalwebrtc.onRegisterUser();
       }
-      for (let pcix in signalwebrtc.pendingConnection) {
-        let pendcon = signalwebrtc.pendingConnection[pcix];
+      for (let pendcon of signalwebrtc.pendingConnection) {
         connectWith(pendcon[0],pendcon[1],pendcon[2],pendcon[3]);
       }
       signalwebrtc.pendingConnection = [];
@@ -361,8 +360,8 @@ function recConQuery(fromId, offer) {
     pc.mid = getMidFromSdp(offer.sdp);
     if (signalwebrtc.orphanCandidate[fromId] != null) {
       let cs = signalwebrtc.orphanCandidate[fromId];
-      for (let c in cs) {
-        recCandidate(fromId, cs[c]);
+      for (let csc of cs) {
+        recCandidate(fromId, csc);
       }
       signalwebrtc.orphanCandidate[fromId] = null;
     }
