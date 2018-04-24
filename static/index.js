@@ -442,7 +442,6 @@ function onChannelOpen(pc,sendChannel,cb) {
   var readyState = sendChannel.readyState;
   console.log('Send channel state is: ' + readyState);
   if (readyState === 'open') {
-
     if (cb != null) {
       cb(pc,sendChannel)
     }
