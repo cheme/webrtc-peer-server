@@ -22,7 +22,6 @@ function load_wasm_mod (cb) {
       write : write,
       flush_write : flush_write,
       read : read,
-      suspend : suspend,
     } })
   ).then(results => {
     console.log("got instance");
@@ -33,6 +32,7 @@ function load_wasm_mod (cb) {
     webrtctransport.start_inner = mod.exports.start,
     webrtctransport.connect_to = mod.exports.test_connect_to,
     webrtctransport.send_to = mod.exports.test_send_to,
+    webrtctransport.expect_from  = mod.exports.test_expect_from,
     // end test function
     webrtctransport.memory = mod.exports.memory;
     webrtctransport.alloc = mod.exports.alloc;
@@ -91,6 +91,22 @@ function testSend(send_channel, dest, somestring) {
      len);
    wasm_mod.restore(webrtctransport.transports[send_channel].handle);
 }
+function testExpectFrom(send_channel, dest, somestring) {
+  let d = base64ToWasmByte(dest);
+  let b = new TextEncoder().encode(somestring);
+  let len = b.length;
+  let data_buf = wasm_mod.alloc(len);
+  new Uint8Array(wasm_mod.memory.buffer,data_buf,len).set(new Uint8Array(b));
+ 
+   wasm_mod.expect_from(
+     send_channel,
+     d.ptr,
+     d.len,
+     data_buf,
+     len);
+   wasm_mod.restore(webrtctransport.transports[send_channel].handle);
+}
+
 
 function wasm_log(msg,err) {
   let strMsg = "Webassembly : " + copyCStr(wasm_mod, msg);
@@ -236,10 +252,22 @@ function read_channel_reg(send_channel, dest_id_in, id_len_in, chanId, chan_trig
 
 }
 
-function close_channel(chan) {
-  console.error("unimplemented");
-        // something like
-        // webrtctransport.transports[196784].wrtc.rtcPeerConnections["YWlh"].channels[0].close()
+function close_channel(send_channel, dest_id, id_len, channel_id) {
+  let idDest = wasmByteToBase64(dest_id,id_len);
+  let content = fromWasmByte(content_ptr,content_len);
+  let tr = webrtctransport.transports[send_channel];
+  if (tr == null) {
+    return;
+  }
+  let pcs = tr.wrtc.rtcPeerConnections[idDest.b64];
+  if (pcs == null) {
+    return;
+  }
+  let chan = pcs.channels[channel_id];
+  if (chan == null) {
+    return;
+  }
+  chan.close();
 }
 
 function write(send_channel, dest_id, id_len, channel_id, content_ptr, content_len) {
@@ -320,10 +348,6 @@ function read(send_channel,dest_id,id_len,channel_id,buf,bufLen) {
   return res;
 }
 
-function suspend(service) {
-  console.error("unimplemented");
-}
-
 function base64ToWasmByte(base64) {
   let binary_string =  atob(base64);
   let len = binary_string.length;
@@ -379,5 +403,6 @@ function copyCStr(module, ptr) {
 webrtctransport.run = run;
 webrtctransport.testConnect = testConnect;
 webrtctransport.testSend = testSend;
+webrtctransport.testExpectFrom = testExpectFrom;
 
 export default webrtctransport;
