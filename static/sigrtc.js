@@ -13,6 +13,10 @@ let bufferFullThreshold = 65536;
 function iceCallback (a,b) {
   console.log(a);
 }
+function log_error(e) {
+  console.error("Error : " + e);
+}
+
 function iceGatheringStateChange (a, userdestId) {
   console.log ('ice state change');
   if (a.candidate != null) {
@@ -57,17 +61,18 @@ function iceGatheringStateChangeReply (a,pc, userdestId) {
 }*/
 
 
-
-function connectSocket (cb) {
-  let xhr = new XMLHttpRequest();
-  xhr.responseType = 'text';
-  xhr.onload = () => {
-    let address = 'ws://' + document.location.hostname + ':' + xhr.response;
+// TODO error cb (switch to native promise)
+function connectSocket () {
+  return new Promise((cb,cberr) => {
+  fetch(document.location.href + 'wsport')
+    .then(response => response.text(),cberr)
+    .then(response => {
+    let address = 'ws://' + document.location.hostname + ':' + response;
     var connection = new WebSocket(address, ['webrtcsignaling', 'rust-websocket']);
     connection.onopen = () => {
       if (signalwebrtc.websocket == null ||
         signalwebrtc.websocket.readyState != 1) {
-              signalwebrtc.websocket = connection;
+        signalwebrtc.websocket = connection;
       } else {
         // single socket usage
         connection.close();
@@ -77,24 +82,30 @@ function connectSocket (cb) {
       }
     }
     connection.onerror = (event) => {
-      console.log('ws error : ' + event);
+            // TODO callback it (use promise everywhere)
+      console.log('ws error on connection at ' + address + ' : ' + event);
+      if (cberr != null) {
+        cberr(event);
+      }
     }
     connection.onmessage = (event) => {
       handleSocketMessage(event.data);
     }
-  }
-
-  xhr.open('GET',"./wsport");
-  xhr.send();
+  },cberr);
+  });
 }
 
 function handleSocketMessage(data) {
-  if (data instanceof Blob) {
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
     let fileReader = new FileReader();
     fileReader.onload = function() {
       receiveSocketBytes(new Uint8Array(this.result));
     }
     fileReader.readAsArrayBuffer(data);
+  } else if (data instanceof Uint8Array) {
+    receiveSocketBytes(data);
+  } else if (data instanceof ArrayBuffer) {
+    receiveSocketBytes(new Uint8Array(data));
   } else {
     console.error("receive non blob from websocket");
     console.log(data);
@@ -112,7 +123,7 @@ function receiveSocketBytes(bytes) {
         signalwebrtc.onRegisterUser();
       }
       for (let pendcon of signalwebrtc.pendingConnection) {
-        connectWith(pendcon[0],pendcon[1],pendcon[2],pendcon[3]);
+        connectWith(pendcon[0],pendcon[1],pendcon[2]).then(pendcon[3],pendcon[4]);
       }
       signalwebrtc.pendingConnection = [];
 
@@ -160,55 +171,69 @@ function receiveSocketBytes(bytes) {
     break;
  
     default:
-      console.log("Unmanaged message from server : " + bytes);
+      console.log("Unmanaged message from server : " + bytes[1]);
   }
 }
-function wsSend(c) {
+function wsSend(c,cberr) {
+ var s = (con) => {
+   try {
+     con.send(c)
+   } catch (e) {
+     console.error(e);
+     if (cberr != null) {
+       cberr(e);
+     }
+   }
+ };
  if (signalwebrtc.websocket == null ||
      signalwebrtc.websocket.readyState != 1) {
-   connectSocket(function(con) { 
-     con.send(c) 
-   });
+   connectSocket()
+     .then(s,() => { if (cberr != null) {
+       cberr()
+     }});
  } else {
-   signalwebrtc.websocket.send(c);
+   s(signalwebrtc.websocket);
  }
 }
 
-function registerUser(userId, cb) {
-  if (signalwebrtc.userIdUnderReg != null) {
-    console.log("registering user while another register action is in progress");
-    // return // allow it 
-  }
-  signalwebrtc.userIdUnderReg = userId;
-  let b = base64ToByteMsg(userId,MESSAGE_CODES.REG_USER);
-  if (cb != null) {
-    signalwebrtc.onRegisterUser = cb;
-  }
-  wsSend(b);
+function registerUser(userId) {
+  return new Promise((cb,cberr) => {
+    if (signalwebrtc.userIdUnderReg != null) {
+      console.log("registering user while another register action is in progress");
+      // return // allow it 
+    }
+    signalwebrtc.userIdUnderReg = userId;
+    let b = base64ToByteMsg(userId,MESSAGE_CODES.REG_USER);
+    if (cb != null) {
+      signalwebrtc.onRegisterUser = cb;
+    }
+    wsSend(b,cberr);
+  });
 }
-function withStunServer(cb) {
+function withStunServer() {
+  return new Promise((cb,cberr) => {
   if (signalwebrtc.stunServer != null) {
     cb();
   } else {
-    let xhr = new XMLHttpRequest();
-    xhr.responseType = 'text';
-    xhr.onload = () => {
-      signalwebrtc.stunServer = xhr.response;
+    fetch(document.location.href + 'stunserver')
+    .then(response => response.text(),cberr)
+    .then(response => {
+      signalwebrtc.stunServer = response;
       cb();
-    }
-
-    xhr.open('GET',"./stunserver");
-    xhr.send();
+    },cberr);
   }
+  });
 }
-function connectWith(userdestId,cb,cbclose,cbmessage) {
+
+function connectWith(userdestId,cbclose,cbmessage) {
+  return new Promise((cb,cberr) => {
   if (signalwebrtc.userId == null) {
     // this case will happen a lot : call connect ws from wasm then call connect to from wasm imediatly
     console.log("Trying to connect while not registered, pending connection");
-    signalwebrtc.pendingConnection.push([userdestId,cb,cbclose,cbmessage]);
+    signalwebrtc.pendingConnection.push([userdestId,cbclose,cbmessage,cb,cberr]);
     return;
   }
-  withStunServer (() => {
+  withStunServer().then(() => {
     let iceInit = false;
     if (signalwebrtc.rtcPeerConnections[userdestId] == null) {
       let config = {
@@ -236,7 +261,7 @@ function connectWith(userdestId,cb,cbclose,cbmessage) {
     let sendChannel = pc.createDataChannel(userdestId,
       dataConstraint);
     sendChannel.binaryType = 'arraybuffer';
-    sendChannel.onopen = () => onChannelOpen(pc,sendChannel,cb);
+    sendChannel.onopen = () => onChannelOpen(sendChannel,cb);
     sendChannel.onclose = () => onChannelClose(pc,sendChannel,cbclose);
     sendChannel.onmessage = (event) => onChannelMessage(event,sendChannel,cbmessage);
 
@@ -256,9 +281,11 @@ function connectWith(userdestId,cb,cbclose,cbmessage) {
         (e) => {
           console.log("Error local connect");
           console.log(e);
+          cberr();
         }
       );
     }
+  },cberr);
   });
  
 }
@@ -276,12 +303,15 @@ function getSender(destId,counter) {
 }
 // TODO refactor : destid + nullable counter should be replaced by an uint key internally and expose this 
 // interface
-function sendTo(destId,counter,data,cb,cberr) {
+function sendTo(destId,counter,data) {
+  new Promise((cb,cberr) => {
   let sender = getSender(destId,counter);
   if (sender == null) {
     if (cberr != null) {
       cberr("No sender"); // TODO replace with invalid state error
+      return;
     }
+    return;
   }
   try {
 
@@ -321,7 +351,7 @@ function sendTo(destId,counter,data,cb,cberr) {
         cb()
       }
     };
-    setTimeout(sendAllData(),0);
+    setTimeout(sendAllData,0);
     //sender.send(data);
   } catch (e) {
     // InvalidStateError (wrong state)
@@ -332,12 +362,13 @@ function sendTo(destId,counter,data,cb,cberr) {
       cberr(e);
     }
   }
+});
 }
 
 
 
 function recConQuery(fromId, offer) {
-  withStunServer (() => {
+  withStunServer().then(() => {
     let iceInit = false;
     if (signalwebrtc.rtcPeerConnections[fromId] == null) {
       let config = {
@@ -378,12 +409,12 @@ function recConQuery(fromId, offer) {
       }
     );
     //}
-  });
+  },log_error);
 }
 
 function recConReply(fromId, answer) {
   if (signalwebrtc.rtcPeerConnections[fromId] == null) {
-    console.log("received answer when no offer has been made, ignoring");
+    console.log("received answer when no offer has been made, ignoring " + fromId);
     return;
   }
   let pc = signalwebrtc.rtcPeerConnections[fromId];
@@ -394,7 +425,7 @@ function recConReply(fromId, answer) {
 }
 function recCandidate(fromId, icesdp) {
   if (signalwebrtc.rtcPeerConnections[fromId] == null) {
-    console.log("received candidate when no offer has been made, storing");
+    console.log("received candidate when no offer has been made, storing " + fromId);
     if (signalwebrtc.orphanCandidate[fromId] == null) {
       signalwebrtc.orphanCandidate[fromId] = [];
     }
@@ -438,21 +469,21 @@ function onChannelClose(pc,sendChannel,cbclose) {
     cbclose(pc,sendChannel);
   }
 }
-function onChannelOpen(pc,sendChannel,cb) {
+function onChannelOpen(sendChannel,cb) {
   var readyState = sendChannel.readyState;
   console.log('Send channel state is: ' + readyState);
   if (readyState === 'open') {
     if (cb != null) {
-      cb(pc,sendChannel)
+      cb(sendChannel)
     }
-    
   } else {
+    console.error("Invalid state on channel open : ignoring");
   }
 }
 
 function onDataChannel(event) {
   
-  event.channel.onopen = () => onChannelOpen(this,event.channel,signalwebrtc.ondatachannelopencb);
+  event.channel.onopen = () => onChannelOpen(event.channel,signalwebrtc.ondatachannelopencb);
   event.channel.onclose = () => onChannelClose(this,event.channel);
   event.channel.onmessage = (ev) => onChannelMessage(ev, event.channel);
   this.channels[event.channel.id] = event.channel;
@@ -514,6 +545,7 @@ signalwebrtc.registerUser = registerUser;
 signalwebrtc.connectWith = connectWith;
 signalwebrtc.getSender = getSender;
 signalwebrtc.sendTo = sendTo;
+//signalwebrtc.withStunServer = withStunServer;
 
 }
 

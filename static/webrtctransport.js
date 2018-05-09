@@ -1,11 +1,16 @@
 
-import * as wrtcMod from "./index.js";
+import * as wrtcMod from "./sigrtc.js";
 
 let webrtctransport = {
   transports : {
   }
 }
 let wasm_mod = null;
+
+
+function log_error(e) {
+  console.error("Error : " + e);
+}
 
 function load_wasm_mod (cb) {
   fetch("webrtctransport.wasm").then(response =>
@@ -160,12 +165,12 @@ function query_listener(send_channel,transport_trigger,transport_handle,transpor
   };
 
   // TODO we put to base64 then internaly change to byte for wsocket
-  wrtc.registerUser(idB.b64, () => {
+  wrtc.registerUser(idB.b64).then(() => {
     // on register success
     webrtctransport.transports[send_channel].state = TRANSPORT_STATE.CONNECTED_WS;
     webrtctransport.transport_ready(transport_trigger,transport_status);
     webrtctransport.restore(transport_handle);
-  });
+  }, log_error);
 }
 
 function next_pending_connected(send_channel, id_out, id_len_out, chan_out) {
@@ -193,14 +198,6 @@ function next_pending_connected(send_channel, id_out, id_len_out, chan_out) {
 function query_new_channel(transport_id_in, dest_id_in, id_len_in, channelr_trigger_in, channelw_trigger_in, channel_status_out, channel_count_out) {
   let idDest = wasmByteToBase64(dest_id_in,id_len_in);
   webrtctransport.transports[transport_id_in].wrtc.connectWith(idDest.b64,
-          (transport,chan) => { // on open
-            chan.triggerWasmW = channelw_trigger_in;
-            chan.triggerWasmR = channelr_trigger_in;
-            chan.read_buffs = [];
-            chan.rbix = 0;
-            webrtctransport.connect_success(channelw_trigger_in, channel_status_out, channel_count_out, chan.id);
-            wasm_mod.restore(webrtctransport.transports[transport_id_in].handle);
-          },
           // TODO rem chan??
           (transport,chan) => { // on close
             webrtctransport.connect_close(channelw_trigger_in, channel_status_out);
@@ -218,7 +215,15 @@ function query_new_channel(transport_id_in, dest_id_in, id_len_in, channelr_trig
               webrtctransport.trigger_read(channelr_trigger_in);
               wasm_mod.restore(webrtctransport.transports[transport_id_in].handle);
             }
-          });
+          }).then(
+           (chan) => { // on open
+            chan.triggerWasmW = channelw_trigger_in;
+            chan.triggerWasmR = channelr_trigger_in;
+            chan.read_buffs = [];
+            chan.rbix = 0;
+            webrtctransport.connect_success(channelw_trigger_in, channel_status_out, channel_count_out, chan.id);
+            wasm_mod.restore(webrtctransport.transports[transport_id_in].handle);
+          }, log_error);
 }
 
 function read_channel_reg(send_channel, dest_id_in, id_len_in, chanId, chan_trig_r, chan_trig_w, chan_state) {

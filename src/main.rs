@@ -35,10 +35,11 @@ use futures::sync::mpsc::{
   Sender,
 };
 use std::net::SocketAddr;
+
 const PHRASE: &'static str = "Hello, World!";
 const INDEX_HTML: &'static [u8] = include_bytes!("../static/index.html");
 
-const INDEX_JS: &'static [u8] = include_bytes!("../static/index.js");
+const SIGRTC_JS: &'static [u8] = include_bytes!("../static/sigrtc.js");
 
 const WEBRTCTRANSPORT_JS: &'static [u8] = include_bytes!("../static/webrtctransport.js");
 
@@ -60,10 +61,10 @@ impl Service for FewStaticInBinContent {
           response = response.with_header(ContentLength(INDEX_HTML.len() as u64))
                              .with_body(INDEX_HTML);
         },
-        (&Method::Get, "/index.js") => {
-          response = response.with_header(ContentLength(INDEX_JS.len() as u64))
+        (&Method::Get, "/sigrtc.js") => {
+          response = response.with_header(ContentLength(SIGRTC_JS.len() as u64))
                              .with_header(ContentType(mime::TEXT_JAVASCRIPT))
-                             .with_body(INDEX_JS);
+                             .with_body(SIGRTC_JS);
         },
         (&Method::Get, "/webrtctransport.js") => {
           response = response.with_header(ContentLength(WEBRTCTRANSPORT_JS.len() as u64))
@@ -190,8 +191,7 @@ fn main() {
       //println!("recv : {:?}",&a);
       match a {
         RoutingMsg::REG_USER(addr,user_id, sender) => {
-          // TODO chekc if getmut instead of clone
-          let f2 = sender.clone().send(vec![1,2,3])
+          let f2 = sender.clone().send(vec![REG_USER_OK])
             .map_err(|e|println!("sink error {:?}",e))
             .map(|_|());
           users.insert(user_id.clone(), UserPers {
@@ -369,7 +369,7 @@ fn main() {
                            match type_msg {
                              REG_USER => {
                                spawn_future(tx3.send(RoutingMsg::REG_USER(addr,b,to_route.clone())),"Send reg msg", &handle3);
-                               Some(OwnedMessage::Binary(vec![REG_USER_OK]))
+                               None
                              },
                              CONN_WITH_SDP 
                              | ICE_CANDIDATE 

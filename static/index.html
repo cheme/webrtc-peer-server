@@ -9,7 +9,7 @@
      window.webrtctransport = webrtctransport;
    </script>
    <script type="module">
-     import sigrtc from './index.js';
+     import sigrtc from './sigrtc.js';
      window.sigrtc = sigrtc;
    </script>
    <script nomodule >
@@ -18,11 +18,11 @@
      xhr.responseType = 'javascript';
      xhr.onload = () => {
        let js = xhr.response;
-       let s = js.replace(/export\ .*;/g,'') + "window.newSigwebrtc = newSigwebrtc;";
+       let s = js.replace(/export\ .*;/g,'') + "window.sigrtc = newSigwebrtc;";
        //# sourceURL=site.js`;
        eval(s);
      };
-     xhr.open('GET',"./index.js");
+     xhr.open('GET',"./sigrtc.js");
      xhr.send();
      let xhr = new XMLHttpRequest();
      xhr.responseType = 'javascript';
